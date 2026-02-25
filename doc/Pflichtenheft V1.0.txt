@@ -1,0 +1,222 @@
+Pflichtenheft – Eventing-Modul (Outbox + Dispatcher + Consumer-Idempotenz)
+1. Ziel und Zweck
+Das Eventing-Modul stellt eine wiederverwendbare Bibliothek für Backend-Services bereit, um Domain Events zuverlässig zu erzeugen und zu verarbeiten.
+Ziel ist eine einheitliche Eventing-Grundlage für alle Microservices:
+Producer schreiben Events sicher in eine Outbox (DB).
+Ein Dispatcher verschickt Events (später via Kafka/Rabbit/HTTP; zunächst über ein austauschbares EventBus Interface).
+Consumer verarbeiten Events idempotent (also ohne doppelte Nebenwirkungen bei Wiederholungen).
+Das Modul ist kein eigener Service und besitzt kein Frontend.
+
+2. Geltungsbereich
+In Scope
+Event Envelope (Metadaten + Payload)
+Topic/Naming-Konventionen
+Outbox-Pattern (DB-Tabellen, JPA Entities, Repository)
+OutboxPublisher API (enqueue)
+Dispatcher (Scheduled Polling, Claiming, Retry/Backoff, Status)
+Consumer-Idempotenz (processed_event)
+Reusable Consumer Runner (Pattern-Baustein)
+Spring Boot Auto-Configuration (Starter-Verhalten)
+Tests (positiv/negativ)
+Optional: Admin API + Demo App + Docker
+Out of Scope (für MVP)
+Konkreter Broker-Adapter (Kafka/Rabbit) – wird über EventBus später integriert
+Frontend
+KI-Funktionen
+
+3. Technische Rahmenbedingungen
+Java: 21
+Framework: Spring Boot 4.0.3
+DB: MariaDB 10.x
+Build: Maven Multi-Module
+Config: application.properties
+Migrations: Flyway (Schema wird nicht durch Hibernate erzeugt)
+Persistenz: Spring Data JPA
+Tests: JUnit 5 + Mockito (Integrationtests optional später mit Testcontainers)
+Docker: optional (für Demo App / lokale Tests)
+
+4. Projektstruktur (Multi-Module)
+Parent
+eventing-parent (packaging pom, verwaltet Versionen via Spring Boot BOM)
+Module
+1. eventing-core
+EventEnvelope
+TopicNaming
+Basistypen/Enums (z. B. Status)
+2. eventing-outbox-jpa
+Flyway Migrationen
+JPA Entities + Repositories
+OutboxPublisher.enqueue(...)
+3. eventing-starter
+Auto-Configuration (Starter)
+Dispatcher + Properties
+Consumer-Idempotenz + Runner
+Default EventBus (Noop)
+Optional später:
+eventing-admin-api (Internal REST API, Swagger, Security)
+eventing-demo-app (Docker + Beispielkonfiguration)
+5. Funktionale Anforderungen
+5.1 Event Envelope (eventing-core)
+Beschreibung: Standardformat für Events, das jeder Service identisch nutzt.
+Muss-Felder:
+eventId (UUID als String)
+type (z. B. EmployeeCreated)
+companyId (Mandant)
+timestamp (UTC)
+schemaVersion (Default 1)
+payload (JSON)
+Optional:
+correlationId (zur Nachverfolgung einer Anfrage/Kette)
+causationId (auslösendes Event)
+Akzeptanzkriterien:
+Envelope lässt sich mit Jackson serialisieren/deserialisieren (Unit Test).
+
+5.2 Topic/Naming Konvention (eventing-core)
+Beschreibung: Einheitliche Topic/Channel-Benennung:
+Format:
+<companyId>.<serviceName>.<eventType>
+Akzeptanzkriterien:
+Utility liefert exakt das Format (Unit Test).
+
+5.3 Outbox Schema (eventing-outbox-jpa)
+Beschreibung: Events werden in outbox_event gespeichert, verarbeitete Events in processed_event.
+
+
+Tabelle: outbox_event
+Wesentliche Felder (vereinfacht):
+PK: id (AUTO_INCREMENT)
+company_id, event_id, event_type, schema_version
+occurred_at_utc
+payload_json (LONGTEXT)
+status (z. B. NEW / PROCESSING / SENT / FAILED)
+retry_count, next_attempt_at_utc, last_error
+Claiming: claimed_at_utc, claimed_by
+Unique: (company_id, event_id)
+Index: (status, next_attempt_at_utc)
+
+Tabelle: processed_event
+PK: id
+company_id, consumer_name, event_id, processed_at_utc
+Unique: (company_id, consumer_name, event_id)
+Akzeptanzkriterien:
+Flyway Migrationen vorhanden und lauffähig.
+Entities/Repos bauen.
+
+5.4 OutboxPublisher.enqueue(...) (eventing-outbox-jpa)
+Beschreibung: API für Producer, um Events in die Outbox zu schreiben.
+Regeln:
+companyId ist Pflicht (Fail-Fast: Exception)
+Default:
+status = NEW
+retry_count = 0
+schema_version = 1 (falls nicht gesetzt)
+Akzeptanzkriterien:
+Positive Test: save() wird aufgerufen
+Negative Test: fehlende companyId => Exception
+
+
+5.5 Dispatcher (eventing-starter)
+Beschreibung: Scheduled Job, der Outbox-Events verschickt (über EventBus).
+Hauptfunktionen:
+Polling (Intervall konfigurierbar)
+Batch-Verarbeitung (limit)
+Claiming: atomisches Umsetzen NEW -> PROCESSING, damit mehrere Instanzen nicht doppelt senden
+Publish: EventBus.publish(topic, EventEnvelope)
+Status-Update:
+Erfolg => SENT
+Fehler => Retry (Backoff), dann wieder NEW oder FAILED nach Max-Versuchen
+Aufräumen Claim-Felder (claimed_* wieder null setzen)
+Akzeptanzkriterien:
+Tests decken ab:
+enabled=false => kein Publish
+Claim=0 => kein Publish
+Erfolg => SENT
+Fehler => retry_count++ und NEW/FAILED, Claim cleared
+
+5.6 EventBus Interface (eventing-starter)
+Beschreibung: Austauschpunkt für Transport (Kafka/Rabbit/HTTP etc.).
+MVP:
+Interface publish(topic, envelope)
+Default: NoopEventBus (loggt oder tut nichts)
+Akzeptanzkriterien:
+Dispatcher funktioniert mit Noop/Mock.
+
+
+5.7 Consumer-Idempotenz (eventing-starter)
+Beschreibung: Consumer sollen Events mehrfach bekommen dürfen (at-least-once), ohne doppelte Wirkung.
+Funktionen:
+alreadyProcessed(companyId, consumerName, eventId)
+markProcessed(companyId, consumerName, eventId)
+Duplicate wird toleriert (idempotent).
+Akzeptanzkriterien:
+Duplicate insert führt nicht zu einem Fehler nach außen (Test).
+
+5.8 Consumer Runner Pattern (eventing-starter)
+Beschreibung: Wiederverwendbarer Ablauf:
+1. prüfen ob verarbeitet
+2. laden/handlen
+3. als verarbeitet markieren
+Akzeptanzkriterien:
+alreadyProcessed => handler wird nicht aufgerufen
+normal => handler wird aufgerufen + markProcessed
+
+5.9 Spring Boot Auto-Configuration (eventing-starter)
+Beschreibung: Bei Einbindung als Dependency wird Eventing “automatisch” verdrahtet.
+MVP:
+@AutoConfiguration
+@EnableConfigurationProperties(...)
+Default Beans via @ConditionalOnMissingBean
+Dispatcher nur bei eventing.dispatcher.enabled=true (Default true im Modul, aber Services können es deaktivieren)
+Akzeptanzkriterien:
+Context-Test (z. B. ApplicationContextRunner) lädt Autoconfig und erstellt Beans.
+
+
+6. Konfiguration (application.properties)
+Beispiel (Service-Seite):
+eventing.service-name=employee-service
+eventing.dispatcher.enabled=false
+eventing.dispatcher.batch-size=50
+eventing.dispatcher.poll-interval-ms=1000
+eventing.dispatcher.max-attempts=10
+eventing.dispatcher.backoff-initial-ms=1000
+eventing.dispatcher.backoff-multiplier=2.0
+eventing.dispatcher.backoff-max-ms=600000
+
+7. Nicht-funktionale Anforderungen
+7.1 Zuverlässigkeit
+Outbox stellt sicher: DB-Write und Event-Write passieren in einem konsistenten Ablauf.
+Dispatcher arbeitet fehlertolerant (Retry + Backoff).
+7.2 Parallelität / Skalierung
+Claiming verhindert Doppelverarbeitung bei mehreren Instanzen.
+Batch-Limit verhindert Überlast.
+7.3 Sicherheit
+Modul selbst enthält keine externen Endpunkte (außer optional Admin API).
+Optional Admin API:
+JWT Resource Server
+Scope-basiert (z. B. SCOPE_eventing.admin)
+7.4 Logging/Monitoring
+Warnung bei Publish-Fehlern (inkl. last_error Speicherung)
+Optional: Actuator/Metrics-Hooks später
+
+
+8. Testanforderungen
+Pro Feature mindestens:
+positiver Test
+negativer Test
+Tests standardmäßig als Unit-Tests (Mockito), Integrationtests optional später.
+
+9. Abnahmekriterien (MVP)
+Das Eventing-Modul gilt als abgenommen, wenn:
+1. Multi-Module Build grün (mvn test)
+2. eventing-core: Envelope + TopicNaming getestet
+3. outbox-jpa: Schema + Entities/Repos + enqueue getestet
+4. starter: Dispatcher (Claiming+Retry) + Envelope publish + Idempotenz + ConsumerRunner + Autoconfig getestet
+5. Konfigurationsparameter dokumentiert (kurz in README)
+
+10. Mini-Glossar (einfach)
+Outbox Pattern: Events werden zuerst in einer DB-Tabelle gespeichert und später zuverlässig “verschickt”.
+Dispatcher: Hintergrundprozess, der Outbox-Events abarbeitet.
+Claiming: Reservieren von Datensätzen, damit nicht zwei Instanzen das Gleiche tun.
+Idempotenz: Mehrfaches Ausführen führt zum gleichen Ergebnis wie einmal.
+Envelope: Standard-“Umschlag” um ein Event (Metadaten + Payload).
+
