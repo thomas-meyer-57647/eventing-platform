@@ -14,6 +14,7 @@ public class EventingDispatcherProperties {
     private long backoffInitialMs = 1000;
     private double backoffMultiplier = 2.0;
     private long backoffMaxMs = 600_000;
+    private String serviceName;
 
     public boolean isEnabled() {
         return enabled;
@@ -69,5 +70,13 @@ public class EventingDispatcherProperties {
 
     public void setBackoffMaxMs(long backoffMaxMs) {
         this.backoffMaxMs = backoffMaxMs;
+    }
+
+    public String getServiceName() {
+        return serviceName;
+    }
+
+    public void setServiceName(String serviceName) {
+        this.serviceName = serviceName;
     }
 }

@@ -1,5 +1,8 @@
 package de.innologic.eventing.starter.dispatch;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import de.innologic.eventing.core.EventEnvelope;
 import de.innologic.eventing.core.TopicNaming;
 import de.innologic.eventing.outbox.jpa.OutboxEventEntity;
 import de.innologic.eventing.outbox.jpa.OutboxEventRepository;
@@ -8,6 +11,7 @@ import de.innologic.eventing.starter.event.EventBus;
 import jakarta.transaction.Transactional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.env.Environment;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -30,24 +34,32 @@ public class OutboxDispatcher {
     private final EventBus eventBus;
     private final OutboxEventRepository repository;
     private final Clock clock;
+    private final ObjectMapper mapper;
     private final String instanceId;
+    private final String serviceName;
 
     public OutboxDispatcher(EventingDispatcherProperties properties,
                             EventBus eventBus,
-                            OutboxEventRepository repository) {
-        this(properties, eventBus, repository, Clock.systemUTC(), UUID.randomUUID().toString());
+                            OutboxEventRepository repository,
+                            Environment environment,
+                            ObjectMapper mapper) {
+        this(properties, eventBus, repository, Clock.systemUTC(), environment, mapper, UUID.randomUUID().toString());
     }
 
     OutboxDispatcher(EventingDispatcherProperties properties,
                      EventBus eventBus,
                      OutboxEventRepository repository,
                      Clock clock,
+                     Environment environment,
+                     ObjectMapper mapper,
                      String instanceId) {
         this.properties = properties;
         this.eventBus = eventBus;
         this.repository = repository;
         this.clock = clock;
+        this.mapper = mapper;
         this.instanceId = instanceId;
+        this.serviceName = determineServiceName(properties, environment);
     }
 
     @Scheduled(fixedDelayString = "${eventing.dispatcher.poll-interval-ms:1000}")
@@ -75,8 +87,9 @@ public class OutboxDispatcher {
 
     private void dispatchEvent(OutboxEventEntity event) {
         try {
-            String topic = TopicNaming.topic(event.getCompanyId(), "dispatcher", event.getEventType());
-            eventBus.publish(topic, event.getPayloadJson());
+            EventEnvelope envelope = buildEnvelope(event);
+            String topic = TopicNaming.topic(event.getCompanyId(), serviceName, event.getEventType());
+            eventBus.publish(topic, envelope);
             event.setStatus(STATUS_SENT);
             event.setNextAttemptAtUtc(null);
             event.setRetryCount(0);
@@ -87,6 +100,20 @@ public class OutboxDispatcher {
         } finally {
             repository.save(event);
         }
+    }
+
+    private EventEnvelope buildEnvelope(OutboxEventEntity event) throws Exception {
+        EventEnvelope envelope = new EventEnvelope();
+        envelope.setEventId(event.getEventId());
+        envelope.setType(event.getEventType());
+        envelope.setCompanyId(event.getCompanyId());
+        envelope.setTimestamp(event.getOccurredAtUtc() != null ? event.getOccurredAtUtc() : Instant.now(clock));
+        envelope.setSchemaVersion(event.getSchemaVersion());
+        envelope.setCorrelationId(event.getCorrelationId());
+        envelope.setCausationId(event.getCausationId());
+        JsonNode payload = mapper.readTree(event.getPayloadJson());
+        envelope.setPayload(payload);
+        return envelope;
     }
 
     private void handleDispatchError(OutboxEventEntity event, Exception error) {
@@ -113,5 +140,12 @@ public class OutboxDispatcher {
         double multiplierPow = Math.pow(properties.getBackoffMultiplier(), attempts - 1);
         long delay = Math.round(properties.getBackoffInitialMs() * multiplierPow);
         return Math.min(delay, properties.getBackoffMaxMs());
+    }
+
+    private String determineServiceName(EventingDispatcherProperties properties, Environment environment) {
+        if (properties.getServiceName() != null && !properties.getServiceName().isBlank()) {
+            return properties.getServiceName();
+        }
+        return environment.getProperty("spring.application.name", "unknown");
     }
 }
