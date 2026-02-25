@@ -16,5 +16,5 @@ CREATE TABLE outbox_event (
     last_error LONGTEXT,
     dedup_key VARCHAR(200),
     UNIQUE KEY uniq_outbox_company_event (company_id, event_id),
-    INDEX idx_outbox_status_next_attempt (status, next_attempt_at_utc)
+    INDEX idx_outbox_status_next (status, next_attempt_at_utc)
 );
