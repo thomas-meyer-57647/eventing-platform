@@ -10,7 +10,6 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.data.domain.PageRequest;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -61,13 +60,22 @@ class OutboxDispatcherTest {
     }
 
     @Test
-    void claimsTwoEventsThenPublishesTwice() {
+    void claimsZeroEventsSkipsPublish() {
+        when(repository.claimDueNewEvents(any(), eq(properties.getBatchSize()))).thenReturn(0);
+
+        dispatcher.dispatch();
+
+        verifyNoInteractions(eventBus);
+        verify(repository, times(0)).save(any());
+    }
+
+    @Test
+    void claimReturnsTwoEventsPublishesTwice() {
         OutboxEventEntity first = newEvent("company-1");
         OutboxEventEntity second = newEvent("company-2");
-        when(repository.claimPendingEvents(eq(FIXED_CLOCK.instant()), eq(DISPATCHER_ID), eq(properties.getBatchSize())))
-                .thenReturn(2);
+        when(repository.claimDueNewEvents(any(), eq(properties.getBatchSize()))).thenReturn(2);
         when(repository.findByStatusAndClaimedByOrderByOccurredAtUtcAsc(
-                eq(OutboxDispatcher.STATUS_PROCESSING), eq(DISPATCHER_ID), any(PageRequest.class)))
+                eq(OutboxDispatcher.STATUS_PROCESSING), any()))
                 .thenReturn(List.of(first, second));
         when(repository.save(any(OutboxEventEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -80,10 +88,10 @@ class OutboxDispatcherTest {
     @Test
     void successfulPublishMarksSent() {
         OutboxEventEntity event = newEvent("company-3");
-        when(repository.claimPendingEvents(eq(FIXED_CLOCK.instant()), eq(DISPATCHER_ID), eq(properties.getBatchSize())))
+        when(repository.claimDueNewEvents(any(), eq(properties.getBatchSize())))
                 .thenReturn(1);
         when(repository.findByStatusAndClaimedByOrderByOccurredAtUtcAsc(
-                eq(OutboxDispatcher.STATUS_PROCESSING), eq(DISPATCHER_ID), any(PageRequest.class)))
+                eq(OutboxDispatcher.STATUS_PROCESSING), any()))
                 .thenReturn(List.of(event));
         when(repository.save(any(OutboxEventEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -103,10 +111,10 @@ class OutboxDispatcherTest {
     void publishFailureIncrementsRetry() {
         properties.setMaxAttempts(3);
         OutboxEventEntity event = newEvent("company-4");
-        when(repository.claimPendingEvents(eq(FIXED_CLOCK.instant()), eq(DISPATCHER_ID), eq(properties.getBatchSize())))
+        when(repository.claimDueNewEvents(any(), eq(properties.getBatchSize())))
                 .thenReturn(1);
         when(repository.findByStatusAndClaimedByOrderByOccurredAtUtcAsc(
-                eq(OutboxDispatcher.STATUS_PROCESSING), eq(DISPATCHER_ID), any(PageRequest.class)))
+                eq(OutboxDispatcher.STATUS_PROCESSING), any()))
                 .thenReturn(List.of(event));
         doThrow(new RuntimeException("boom")).when(eventBus).publish(any(), eq(event.getPayloadJson()));
         when(repository.save(any(OutboxEventEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
@@ -126,10 +134,10 @@ class OutboxDispatcherTest {
     void exceededRetriesMarksFailed() {
         properties.setMaxAttempts(1);
         OutboxEventEntity event = newEvent("company-5");
-        when(repository.claimPendingEvents(eq(FIXED_CLOCK.instant()), eq(DISPATCHER_ID), eq(properties.getBatchSize())))
+        when(repository.claimDueNewEvents(any(), eq(properties.getBatchSize())))
                 .thenReturn(1);
         when(repository.findByStatusAndClaimedByOrderByOccurredAtUtcAsc(
-                eq(OutboxDispatcher.STATUS_PROCESSING), eq(DISPATCHER_ID), any(PageRequest.class)))
+                eq(OutboxDispatcher.STATUS_PROCESSING), any()))
                 .thenReturn(List.of(event));
         doThrow(new RuntimeException("boom")).when(eventBus).publish(any(), eq(event.getPayloadJson()));
         when(repository.save(any(OutboxEventEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));

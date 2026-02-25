@@ -5,13 +5,12 @@ import de.innologic.eventing.outbox.jpa.OutboxEventEntity;
 import de.innologic.eventing.outbox.jpa.OutboxEventRepository;
 import de.innologic.eventing.starter.config.EventingDispatcherProperties;
 import de.innologic.eventing.starter.event.EventBus;
+import jakarta.transaction.Transactional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-import jakarta.transaction.Transactional;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
@@ -31,7 +30,7 @@ public class OutboxDispatcher {
     private final EventBus eventBus;
     private final OutboxEventRepository repository;
     private final Clock clock;
-    private final String dispatcherId;
+    private final String instanceId;
 
     public OutboxDispatcher(EventingDispatcherProperties properties,
                             EventBus eventBus,
@@ -43,12 +42,12 @@ public class OutboxDispatcher {
                      EventBus eventBus,
                      OutboxEventRepository repository,
                      Clock clock,
-                     String dispatcherId) {
+                     String instanceId) {
         this.properties = properties;
         this.eventBus = eventBus;
         this.repository = repository;
         this.clock = clock;
-        this.dispatcherId = dispatcherId;
+        this.instanceId = instanceId;
     }
 
     @Scheduled(fixedDelayString = "${eventing.dispatcher.poll-interval-ms:1000}")
@@ -59,14 +58,14 @@ public class OutboxDispatcher {
             return;
         }
 
-        Instant now = Instant.now(clock);
-        int claimed = repository.claimPendingEvents(now, dispatcherId, properties.getBatchSize());
+        String claimId = instanceId + ":" + UUID.randomUUID();
+        int claimed = repository.claimDueNewEvents(claimId, properties.getBatchSize());
         if (claimed <= 0) {
             return;
         }
 
         List<OutboxEventEntity> pending = repository.findByStatusAndClaimedByOrderByOccurredAtUtcAsc(
-                STATUS_PROCESSING, dispatcherId, PageRequest.of(0, claimed)
+                STATUS_PROCESSING, claimId
         );
 
         for (OutboxEventEntity event : pending) {
@@ -98,7 +97,7 @@ public class OutboxDispatcher {
         if (attempts >= properties.getMaxAttempts()) {
             event.setStatus(STATUS_FAILED);
             event.setNextAttemptAtUtc(null);
-            event.setClaimedAt(null);
+            event.setClaimedAtUtc(null);
             event.setClaimedBy(null);
             return;
         }
