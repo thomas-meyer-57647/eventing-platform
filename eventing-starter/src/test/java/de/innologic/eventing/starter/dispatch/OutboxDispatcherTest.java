@@ -1,16 +1,16 @@
 package de.innologic.eventing.starter.dispatch;
 
 import de.innologic.eventing.outbox.jpa.OutboxEventEntity;
+import de.innologic.eventing.outbox.jpa.OutboxEventRepository;
 import de.innologic.eventing.starter.config.EventingDispatcherProperties;
 import de.innologic.eventing.starter.event.EventBus;
-import de.innologic.eventing.starter.outbox.PublisherOutboxEventRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.PageRequest;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -20,7 +20,6 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -33,9 +32,10 @@ import static org.mockito.Mockito.when;
 class OutboxDispatcherTest {
 
     private static final Clock FIXED_CLOCK = Clock.fixed(Instant.parse("2026-02-25T00:00:00Z"), ZoneOffset.UTC);
+    private static final String DISPATCHER_ID = "test-dispatcher";
 
     @Mock
-    private PublisherOutboxEventRepository repository;
+    private OutboxEventRepository repository;
 
     @Mock
     private EventBus eventBus;
@@ -47,7 +47,7 @@ class OutboxDispatcherTest {
     void setUp() {
         properties = new EventingDispatcherProperties();
         properties.setBatchSize(5);
-        dispatcher = new OutboxDispatcher(properties, eventBus, repository, FIXED_CLOCK);
+        dispatcher = new OutboxDispatcher(properties, eventBus, repository, FIXED_CLOCK, DISPATCHER_ID);
     }
 
     @Test
@@ -61,9 +61,29 @@ class OutboxDispatcherTest {
     }
 
     @Test
+    void claimsTwoEventsThenPublishesTwice() {
+        OutboxEventEntity first = newEvent("company-1");
+        OutboxEventEntity second = newEvent("company-2");
+        when(repository.claimPendingEvents(eq(FIXED_CLOCK.instant()), eq(DISPATCHER_ID), eq(properties.getBatchSize())))
+                .thenReturn(2);
+        when(repository.findByStatusAndClaimedByOrderByOccurredAtUtcAsc(
+                eq(OutboxDispatcher.STATUS_PROCESSING), eq(DISPATCHER_ID), any(PageRequest.class)))
+                .thenReturn(List.of(first, second));
+        when(repository.save(any(OutboxEventEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        dispatcher.dispatch();
+
+        verify(eventBus, times(2)).publish(any(), any());
+        verify(repository, times(2)).save(any(OutboxEventEntity.class));
+    }
+
+    @Test
     void successfulPublishMarksSent() {
-        OutboxEventEntity event = newEvent("company-1");
-        when(repository.findPendingEvents(eq(OutboxDispatcher.STATUS_NEW), eq(FIXED_CLOCK.instant()), any(Pageable.class)))
+        OutboxEventEntity event = newEvent("company-3");
+        when(repository.claimPendingEvents(eq(FIXED_CLOCK.instant()), eq(DISPATCHER_ID), eq(properties.getBatchSize())))
+                .thenReturn(1);
+        when(repository.findByStatusAndClaimedByOrderByOccurredAtUtcAsc(
+                eq(OutboxDispatcher.STATUS_PROCESSING), eq(DISPATCHER_ID), any(PageRequest.class)))
                 .thenReturn(List.of(event));
         when(repository.save(any(OutboxEventEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -76,15 +96,20 @@ class OutboxDispatcherTest {
         assertEquals("SENT", saved.getStatus());
         assertEquals(0, saved.getRetryCount());
         assertNull(saved.getNextAttemptAtUtc());
+        assertNull(saved.getClaimedBy());
     }
 
     @Test
     void publishFailureIncrementsRetry() {
         properties.setMaxAttempts(3);
-        OutboxEventEntity event = newEvent("company-2");
-        when(repository.findPendingEvents(eq(OutboxDispatcher.STATUS_NEW), eq(FIXED_CLOCK.instant()), any(Pageable.class)))
+        OutboxEventEntity event = newEvent("company-4");
+        when(repository.claimPendingEvents(eq(FIXED_CLOCK.instant()), eq(DISPATCHER_ID), eq(properties.getBatchSize())))
+                .thenReturn(1);
+        when(repository.findByStatusAndClaimedByOrderByOccurredAtUtcAsc(
+                eq(OutboxDispatcher.STATUS_PROCESSING), eq(DISPATCHER_ID), any(PageRequest.class)))
                 .thenReturn(List.of(event));
         doThrow(new RuntimeException("boom")).when(eventBus).publish(any(), eq(event.getPayloadJson()));
+        when(repository.save(any(OutboxEventEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         dispatcher.dispatch();
 
@@ -94,15 +119,20 @@ class OutboxDispatcherTest {
         assertEquals("NEW", saved.getStatus());
         assertEquals(1, saved.getRetryCount());
         assertNotNull(saved.getNextAttemptAtUtc());
+        assertNull(saved.getClaimedBy());
     }
 
     @Test
     void exceededRetriesMarksFailed() {
         properties.setMaxAttempts(1);
-        OutboxEventEntity event = newEvent("company-3");
-        when(repository.findPendingEvents(eq(OutboxDispatcher.STATUS_NEW), eq(FIXED_CLOCK.instant()), any(Pageable.class)))
+        OutboxEventEntity event = newEvent("company-5");
+        when(repository.claimPendingEvents(eq(FIXED_CLOCK.instant()), eq(DISPATCHER_ID), eq(properties.getBatchSize())))
+                .thenReturn(1);
+        when(repository.findByStatusAndClaimedByOrderByOccurredAtUtcAsc(
+                eq(OutboxDispatcher.STATUS_PROCESSING), eq(DISPATCHER_ID), any(PageRequest.class)))
                 .thenReturn(List.of(event));
         doThrow(new RuntimeException("boom")).when(eventBus).publish(any(), eq(event.getPayloadJson()));
+        when(repository.save(any(OutboxEventEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         dispatcher.dispatch();
 
@@ -112,6 +142,7 @@ class OutboxDispatcherTest {
         assertEquals("FAILED", saved.getStatus());
         assertEquals(1, saved.getRetryCount());
         assertNull(saved.getNextAttemptAtUtc());
+        assertNull(saved.getClaimedBy());
     }
 
     private OutboxEventEntity newEvent(String companyId) {

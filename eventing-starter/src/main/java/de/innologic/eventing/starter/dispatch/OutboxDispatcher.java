@@ -2,23 +2,26 @@ package de.innologic.eventing.starter.dispatch;
 
 import de.innologic.eventing.core.TopicNaming;
 import de.innologic.eventing.outbox.jpa.OutboxEventEntity;
+import de.innologic.eventing.outbox.jpa.OutboxEventRepository;
 import de.innologic.eventing.starter.config.EventingDispatcherProperties;
 import de.innologic.eventing.starter.event.EventBus;
-import de.innologic.eventing.starter.outbox.PublisherOutboxEventRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import jakarta.transaction.Transactional;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
+import java.util.UUID;
 
 @Component
 public class OutboxDispatcher {
 
     static final String STATUS_NEW = "NEW";
+    static final String STATUS_PROCESSING = "PROCESSING";
     private static final String STATUS_SENT = "SENT";
     private static final String STATUS_FAILED = "FAILED";
 
@@ -26,37 +29,44 @@ public class OutboxDispatcher {
 
     private final EventingDispatcherProperties properties;
     private final EventBus eventBus;
-    private final PublisherOutboxEventRepository repository;
+    private final OutboxEventRepository repository;
     private final Clock clock;
+    private final String dispatcherId;
 
     public OutboxDispatcher(EventingDispatcherProperties properties,
                             EventBus eventBus,
-                            PublisherOutboxEventRepository repository) {
-        this(properties, eventBus, repository, Clock.systemUTC());
+                            OutboxEventRepository repository) {
+        this(properties, eventBus, repository, Clock.systemUTC(), UUID.randomUUID().toString());
     }
 
     OutboxDispatcher(EventingDispatcherProperties properties,
                      EventBus eventBus,
-                     PublisherOutboxEventRepository repository,
-                     Clock clock) {
+                     OutboxEventRepository repository,
+                     Clock clock,
+                     String dispatcherId) {
         this.properties = properties;
         this.eventBus = eventBus;
         this.repository = repository;
         this.clock = clock;
+        this.dispatcherId = dispatcherId;
     }
 
     @Scheduled(fixedDelayString = "${eventing.dispatcher.poll-interval-ms:1000}")
+    @Transactional
     public void dispatch() {
         if (!properties.isEnabled()) {
             log.debug("Eventing dispatcher disabled; skipping run");
             return;
         }
 
-        Instant cutoff = Instant.now(clock);
-        List<OutboxEventEntity> pending = repository.findPendingEvents(
-                STATUS_NEW,
-                cutoff,
-                PageRequest.of(0, properties.getBatchSize())
+        Instant now = Instant.now(clock);
+        int claimed = repository.claimPendingEvents(now, dispatcherId, properties.getBatchSize());
+        if (claimed <= 0) {
+            return;
+        }
+
+        List<OutboxEventEntity> pending = repository.findByStatusAndClaimedByOrderByOccurredAtUtcAsc(
+                STATUS_PROCESSING, dispatcherId, PageRequest.of(0, claimed)
         );
 
         for (OutboxEventEntity event : pending) {
@@ -71,6 +81,8 @@ public class OutboxDispatcher {
             event.setStatus(STATUS_SENT);
             event.setNextAttemptAtUtc(null);
             event.setRetryCount(0);
+            event.setClaimedAtUtc(null);
+            event.setClaimedBy(null);
         } catch (Exception e) {
             handleDispatchError(event, e);
         } finally {
@@ -86,10 +98,14 @@ public class OutboxDispatcher {
         if (attempts >= properties.getMaxAttempts()) {
             event.setStatus(STATUS_FAILED);
             event.setNextAttemptAtUtc(null);
+            event.setClaimedAt(null);
+            event.setClaimedBy(null);
             return;
         }
 
         event.setStatus(STATUS_NEW);
+        event.setClaimedAtUtc(null);
+        event.setClaimedBy(null);
         long delay = calculateBackoffMillis(attempts);
         event.setNextAttemptAtUtc(Instant.now(clock).plusMillis(delay));
     }

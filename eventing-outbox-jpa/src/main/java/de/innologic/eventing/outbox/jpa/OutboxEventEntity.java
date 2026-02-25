@@ -71,6 +71,11 @@ public class OutboxEventEntity {
     @Column(name = "dedup_key", length = 200)
     private String dedupKey;
 
+    @Column(name = "claimed_at_utc")
+    private Instant claimedAtUtc;
+    @Column(name = "claimed_by", length = 100)
+    private String claimedBy;
+
     public Long getId() {
         return id;
     }
@@ -197,5 +202,21 @@ public class OutboxEventEntity {
 
     public void setDedupKey(String dedupKey) {
         this.dedupKey = dedupKey;
+    }
+
+    public Instant getClaimedAtUtc() {
+        return claimedAtUtc;
+    }
+
+    public void setClaimedAtUtc(Instant claimedAtUtc) {
+        this.claimedAtUtc = claimedAtUtc;
+    }
+
+    public String getClaimedBy() {
+        return claimedBy;
+    }
+
+    public void setClaimedBy(String claimedBy) {
+        this.claimedBy = claimedBy;
     }
 }
