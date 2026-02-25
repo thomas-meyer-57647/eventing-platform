@@ -10,6 +10,7 @@ import java.util.UUID;
 public class OutboxPublisher {
 
     private static final String STATUS_NEW = "NEW";
+    private static final int SCHEMA_VERSION = 1;
 
     private final OutboxEventRepository repository;
     private final Clock clock;
@@ -24,14 +25,14 @@ public class OutboxPublisher {
     }
 
     public OutboxEventEntity enqueue(EventEnvelope envelope) {
-        validateCompany(envelope);
+        requireCompany(envelope);
 
         OutboxEventEntity entity = new OutboxEventEntity();
         entity.setCompanyId(envelope.getCompanyId());
         entity.setEventId(resolveEventId(envelope));
         entity.setEventType(envelope.getType());
-        entity.setSchemaVersion(envelope.getSchemaVersion());
-        entity.setPayloadJson(resolvePayload(envelope.getPayload()));
+        entity.setSchemaVersion(SCHEMA_VERSION);
+        entity.setPayloadJson(requirePayload(envelope.getPayload()));
         entity.setStatus(STATUS_NEW);
         entity.setRetryCount(0);
         entity.setOccurredAtUtc(Instant.now(clock));
@@ -40,7 +41,7 @@ public class OutboxPublisher {
         return repository.save(entity);
     }
 
-    private static void validateCompany(EventEnvelope envelope) {
+    private static void requireCompany(EventEnvelope envelope) {
         if (envelope == null || envelope.getCompanyId() == null || envelope.getCompanyId().isBlank()) {
             throw new IllegalArgumentException("companyId is required");
         }
@@ -50,7 +51,7 @@ public class OutboxPublisher {
         return envelope.getEventId() != null ? envelope.getEventId() : UUID.randomUUID().toString();
     }
 
-    private static String resolvePayload(JsonNode payload) {
+    private static String requirePayload(JsonNode payload) {
         if (payload == null) {
             throw new IllegalArgumentException("payload is required");
         }

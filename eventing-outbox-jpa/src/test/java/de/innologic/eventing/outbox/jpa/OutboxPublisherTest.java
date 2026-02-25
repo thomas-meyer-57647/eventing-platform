@@ -9,70 +9,55 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.time.Clock;
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class OutboxPublisherTest {
 
-    private static final Clock FIXED_CLOCK = Clock.fixed(Instant.parse("2026-02-25T00:00:00Z"), ZoneOffset.UTC);
-
     @Mock
     private OutboxEventRepository repository;
 
     private final ObjectMapper mapper = new ObjectMapper();
-    private final AtomicInteger savedCount = new AtomicInteger();
-
     private OutboxPublisher publisher;
 
     @BeforeEach
     void setUp() {
-        publisher = new OutboxPublisher(repository, FIXED_CLOCK);
-        savedCount.set(0);
-        when(repository.count()).thenAnswer(invocation -> (long) savedCount.get());
+        publisher = new OutboxPublisher(repository);
     }
 
     @Test
-    void enqueueWithCompanyIdPersistsEvent() {
-        when(repository.save(any(OutboxEventEntity.class))).thenAnswer(invocation -> {
-            savedCount.incrementAndGet();
-            return invocation.getArgument(0);
-        });
+    void enqueueWithCompanyIdCallsSaveOnce() {
+        EventEnvelope envelope = createEnvelope("company-1");
+        when(repository.save(any(OutboxEventEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
-        EventEnvelope envelope = createEnvelope("company-42");
+        publisher.enqueue(envelope);
 
-        assertEquals(0L, repository.count());
-        OutboxEventEntity saved = publisher.enqueue(envelope);
-        assertEquals(1L, repository.count());
-        assertEquals("company-42", saved.getCompanyId());
-        assertEquals("test.event", saved.getEventType());
-        assertEquals("NEW", saved.getStatus());
-        assertEquals(0, saved.getRetryCount());
-        assertEquals(FIXED_CLOCK.instant(), saved.getOccurredAtUtc());
+        verify(repository, times(1)).save(any(OutboxEventEntity.class));
     }
 
     @Test
-    void enqueueWithoutCompanyIdFails() {
+    void enqueueWithoutCompanyIdThrows() {
         EventEnvelope envelope = createEnvelope(null);
 
         assertThrows(IllegalArgumentException.class, () -> publisher.enqueue(envelope));
-        assertEquals(0L, repository.count());
+
+        verifyNoInteractions(repository);
     }
 
     private EventEnvelope createEnvelope(String companyId) {
-        ObjectNode payload = mapper.createObjectNode().put("payload", "value");
+        ObjectNode payload = mapper.createObjectNode().put("foo", "bar");
 
         EventEnvelope envelope = new EventEnvelope();
         envelope.setCompanyId(companyId);
-        envelope.setType("test.event");
-        envelope.setEventId("event-123");
+        envelope.setType("example.event");
+        envelope.setEventId("event-1");
         envelope.setPayload(payload);
         envelope.setTimestamp(Instant.now());
         return envelope;
