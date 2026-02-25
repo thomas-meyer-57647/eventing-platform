@@ -1,0 +1,20 @@
+CREATE TABLE outbox_event (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    company_id VARCHAR(64) NOT NULL,
+    event_id CHAR(36) NOT NULL,
+    event_type VARCHAR(200) NOT NULL,
+    schema_version INT NOT NULL DEFAULT 1,
+    occurred_at_utc TIMESTAMP NOT NULL,
+    correlation_id VARCHAR(64),
+    causation_id CHAR(36),
+    aggregate_type VARCHAR(100),
+    aggregate_id VARCHAR(100),
+    payload_json LONGTEXT NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    retry_count INT NOT NULL DEFAULT 0,
+    next_attempt_at_utc TIMESTAMP NULL,
+    last_error LONGTEXT,
+    dedup_key VARCHAR(200),
+    UNIQUE KEY uniq_outbox_company_event (company_id, event_id),
+    INDEX idx_outbox_status_next_attempt (status, next_attempt_at_utc)
+);
